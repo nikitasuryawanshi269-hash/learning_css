@@ -1,0 +1,880 @@
+let vfLastProcessedTime = undefined;
+let vfLastScrollDirection = 'down';
+let vfLastScrollY = 0;
+let vfLastMouseX = 0;
+let vfLastMouseY = 0;
+let vfLastMouseSpeed = 0;
+let vfLastMouseTime = Date.now();
+let vfPageLoadTime = Date.now();
+const vfK = 'vf_action_taken', vfTTl = 3600
+
+// Track mouse movement
+document.addEventListener('mousemove', (e) => {
+  const now = Date.now();
+  const timeDiff = now - vfLastMouseTime;
+  if (timeDiff > 0) {
+    const distance = Math.sqrt(
+      Math.pow(e.clientX - vfLastMouseX, 2) +
+      Math.pow(e.clientY - vfLastMouseY, 2)
+    );
+    vfLastMouseSpeed = distance / timeDiff;
+  }
+  vfLastMouseX = e.clientX;
+  vfLastMouseY = e.clientY;
+  vfLastMouseTime = now;
+});
+
+
+
+const getActionTaken = () => {
+  let a = JSON.parse(localStorage.getItem(vfK) || '{}'), n = Date.now()
+  for (let k in a) if ((n - a[k].timestamp) / 1e3 > (a[k].ttl || 3600)) delete a[k]
+  localStorage.setItem(vfK, JSON.stringify(a))
+  return a
+}
+
+// Track scroll direction
+document.addEventListener('scroll', () => {
+  const currentScrollY = window.scrollY;
+  vfLastScrollDirection = currentScrollY > vfLastScrollY ? 'down' : 'up';
+  vfLastScrollY = currentScrollY;
+});
+
+// Example client-side implementation
+const collectInteractionData = () => {
+  return {
+    engagement: {
+      scroll: {
+        position: window.scrollY,
+        percentage: (window.scrollY / (document.documentElement.scrollHeight - window.innerHeight)) * 100,
+        direction: vfLastScrollDirection
+      },
+      timeOnPage: Date.now() - vfPageLoadTime,
+      mouseMovement: {
+        x: vfLastMouseX,
+        y: vfLastMouseY,
+        speed: vfLastMouseSpeed
+      }
+    },
+    content: {
+      // visibleElements: getVisibleElements(),
+    },
+    actionTaken: getActionTaken(),
+    permanentData: JSON.parse(localStorage.getItem('verifast-user-permanent-data') || '{}')
+  };
+};
+
+
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function isHashBelowPercentage(input, percentage) {
+  const hash = hashString(input);
+  const hashBucket = hash % 100;
+  return hashBucket <= percentage
+}
+
+function appendVerifastSessionToCart() {
+  // First, retrieve the current cart data from Shopify
+  fetch('/cart.js')
+    .then(response => response.json())
+    .then(cart => {
+      // Get current custom attributes from the cart, or default to an empty object
+      const currentAttributes = cart.attributes || {};
+
+      // Generate a new verifast session value (you can adjust the logic as needed)
+      const verifastSessionValue = localStorage.getItem('verifast-session-id');
+
+      // Append the new key to the custom attributes
+      currentAttributes.verifast_session = verifastSessionValue;
+
+      // Update the cart with the new attributes using Shopify's AJAX API
+      return fetch('/cart/update.js', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          attributes: currentAttributes,
+        }),
+      });
+    })
+    .then(response => response.json())
+    .then(updatedCart => {
+      console.log('Cart updated with verifast_session:', updatedCart.attributes.verifast_session);
+    })
+    .catch(error => {
+      console.error('Error updating cart:', error);
+    });
+}
+
+
+function utm_verifast_persistant() {
+  const STORAGE_KEY = 'verifast_attribution';
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const utmSource = urlParams.get('utm_source');
+
+  if (utmSource === 'verifast') {
+    const attributionData = {
+      utm_source: utmSource,
+      utm_medium: urlParams.get('utm_medium') || '',
+      utm_campaign: urlParams.get('utm_campaign') || '',
+      utm_term: urlParams.get('utm_term') || '',
+      utm_content: urlParams.get('utm_content') || '',
+      timestamp: Date.now(),
+    };
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(attributionData));
+
+    updateCart(attributionData);
+  } else {
+    try {
+      const storedData = JSON.parse(localStorage.getItem(STORAGE_KEY));
+      if (storedData && storedData.utm_source === 'verifast') {
+        updateCart(storedData);
+      }
+    } catch (e) {
+      localStorage.removeItem(STORAGE_KEY);
+    }
+  }
+
+  function updateCart(data) {
+    fetch('/cart/update.js', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        attributes: {
+          'utm_source': data.utm_source,
+          'utm_timestamp': data.timestamp,
+          'utm_campaign': data.utm_campaign,
+          'utm_medium': data.utm_medium
+        }
+      })
+    })
+      .then(response => response.json())
+      .then(cart => console.log('Cart updated with attribution data'))
+      .catch(error => console.error('Error updating cart:', error));
+  }
+};
+
+const vfModifyConfig = (config) => {
+  let updatedConfig = null;
+  let flag = false;
+  if (["dr-vaidya.myshopify.com", "lifeelements-store.myshopify.com"].includes(config?.selectedIndex) && isHashBelowPercentage(config?.customerId, 50)) {
+    flag = true;
+  }
+  if (config.internalBotConfig) {
+    updatedConfig = { ...config, internalBotConfig: JSON.parse(JSON.stringify(config.internalBotConfig)) };
+  }
+  else {
+    updatedConfig = { ...config };
+  }
+
+  const browserLanguage = navigator.language;
+  const languageCode = browserLanguage.split('-')[0];
+  const translatedConfig  = updatedConfig?.translations?.[languageCode] ?? undefined;
+  if(translatedConfig) {
+      if(translatedConfig?.pageSpecifics && Object.keys(translatedConfig.pageSpecifics).length > 0) {
+          const pageSpecifics = JSON.parse(JSON.stringify(translatedConfig?.pageSpecifics || {}));
+          updatedConfig["internalBotConfig"] = pageSpecifics
+      }
+      if(translatedConfig?.translatables && Object.keys(translatedConfig.translatables).length > 0) {
+          updatedConfig.nudgeText = translatedConfig?.translatables?.nudgeText
+          updatedConfig.introMessage = translatedConfig?.translatables?.introMessage
+          updatedConfig.indexSuggestions = translatedConfig?.translatables?.bubbles
+      }
+  }
+  
+  const urlObj = new URL(window.location.href);
+  if (updatedConfig?.internalBotConfig?.category_specific_intro) {
+    for (const [category, intro] of Object.entries(updatedConfig?.internalBotConfig?.category_specific_intro)) {
+      if (urlObj.pathname.startsWith(category)) {
+        flag ? updatedConfig['secondIntroMessage'] = intro : updatedConfig.introMessage = intro;
+        break;
+      }
+    }
+  }
+  if (updatedConfig?.internalBotConfig?.page_specific_intro && updatedConfig?.internalBotConfig?.page_specific_intro[urlObj.pathname]) {
+    const introMessage = updatedConfig?.internalBotConfig?.page_specific_intro[urlObj.pathname];
+    flag ? updatedConfig['secondIntroMessage'] = introMessage : updatedConfig.introMessage = introMessage;
+  }
+  if (updatedConfig?.internalBotConfig?.category_specific_bubbles) {
+    for (const [category, bubbles] of Object.entries(updatedConfig?.internalBotConfig?.category_specific_bubbles)) {
+      if (urlObj.pathname.startsWith(category)) {
+        if (Array.isArray(bubbles) && bubbles.length > 0) {
+          updatedConfig.indexSuggestions = bubbles;
+        }
+        break;
+      }
+    }
+  }
+  if (updatedConfig?.internalBotConfig?.page_specific_bubbles && updatedConfig?.internalBotConfig?.page_specific_bubbles[urlObj.pathname]) {
+    const bubbles = updatedConfig?.internalBotConfig?.page_specific_bubbles[urlObj.pathname];
+    updatedConfig.indexSuggestions = bubbles;
+  }
+  if (updatedConfig?.internalBotConfig?.category_specific_nudges) {
+    for (const [category, nudge] of Object.entries(updatedConfig.internalBotConfig.category_specific_nudges)) {
+      if (urlObj.pathname.startsWith(category)) {
+        updatedConfig.nudgeText = nudge;
+        break;
+      }
+    }
+  }
+  if (updatedConfig?.internalBotConfig && updatedConfig?.internalBotConfig?.page_specific_nudges?.[urlObj.pathname]) {
+    updatedConfig.nudgeText = updatedConfig?.internalBotConfig?.page_specific_nudges[urlObj.pathname];
+  }
+  const keysToRemove = ['chatbot_config', 'elementObserver', 'botDisablePaths', 'disabledSessionIdCartUpdate', 'containerAbsolutetop', 'enabledPaths', 'translations', 'eventToCapture'];
+  keysToRemove.forEach((key) => {
+    if (updatedConfig && key in updatedConfig) {
+      delete updatedConfig[key];
+    }
+  });
+  // Remove keys from internalBotConfig if it exists.
+  if (updatedConfig.internalBotConfig) {
+    const removeInternalBotConfig = [
+      'page_specific_nudges',
+      'category_specific_nudges',
+      'page_specific_bubbles',
+      'category_specific_bubbles',
+      'page_specific_intro',
+      'category_specific_intro'
+    ];
+    removeInternalBotConfig.forEach((key1) => {
+      if (updatedConfig && updatedConfig.internalBotConfig && typeof updatedConfig.internalBotConfig === 'object' && key1 in updatedConfig.internalBotConfig) {
+        // Casting to any to allow dynamic deletion.
+        delete updatedConfig.internalBotConfig[key1];
+      }
+    });
+
+  }
+  return updatedConfig;
+};
+
+const isBotVisible = (sessionId, index_name) => {
+  const visible_ab_rates = {
+    ['ramdevstore1.myshopify.com']: 60
+  }
+  const threshold = visible_ab_rates[index_name] !== undefined ? visible_ab_rates[index_name] : 100;
+  const shouldShowBot = isHashBelowPercentage(sessionId, threshold)
+  return shouldShowBot
+}
+
+function isVfMobileDevice() {
+  const mobileUserAgent = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const isSmallScreen = window.innerWidth <= 768;
+  const isTablet = /iPad|tablet|Nexus(?!.*Mobile)/i.test(navigator.userAgent) ||
+    (hasTouch && window.innerWidth >= 600);
+
+  return {
+    isMobile: mobileUserAgent || (hasTouch && isSmallScreen && !isTablet),
+    isTablet: isTablet
+  };
+}
+
+
+
+const vfRecordTraffic = async (index, sessionId) => {
+  try {
+    const debounceKey = `vf_traffic_${sessionId}`;
+    const lastCall = localStorage.getItem(debounceKey);
+    const now = Date.now();
+    
+    // Get today's date string in YYYYMMDD format
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
+    
+    // Only make the API call if it hasn't been called today
+    if (!lastCall || lastCall !== todayStr) {
+      // Extract date from session ID (first 8 characters: YYYYMMDD)
+      const sessionDate = sessionId.substring(0, 8);
+      
+      // Check if session is from today
+      const isFirstTimeVisitor = sessionDate === todayStr;
+      fetch(`https://webhook-gateway.verifast.ai/api/traffic/${index}/${sessionId}?type=${isFirstTimeVisitor ? 'first_time' : 'repeat_visitor'}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      })
+      .then(() => localStorage.setItem(debounceKey, todayStr))
+      .catch(error => console.error('Error:', error));
+    }
+  } catch (e) {
+    console.error("error in record traffic", e);
+  }
+}
+
+
+
+function vfCaptureEvent(platform, args, selectedIndex, customerId) {
+  try {
+    const [command, eventName, parameters] = args;
+    const event = {
+      id: Date.now().toString(),
+      platform,
+      event_name: eventName,
+      parameters: parameters || {},
+      timestamp: new Date().toISOString(),
+      session_id: customerId
+    };
+
+
+    const headers = {
+      'Accept': 'text/plain',
+      'Content-Type': 'application/json'
+    };
+    const insertId = window.crypto.randomUUID();
+    const uid = customerId;
+    const cart_data = {};
+
+    let a_b_visible;
+    if (!uid) {
+      a_b_visible = 3;  // UUID not present
+    } else {
+      const visibilityFlag = isBotVisible(uid, selectedIndex);
+      a_b_visible = visibilityFlag ? 1 : 2; 
+    }
+    
+    const data = JSON.stringify([
+      {
+        "event": eventName,
+        "properties": {
+          "payload": event,
+          "token": "0527017678af18a1b91e3e8869a0acf8",
+          "time": Date.now(),
+          "distinct_id": uid,
+          "$insert_id": insertId,
+          "verifast_uid": uid,
+          "verifast_index": selectedIndex,
+          "event_name": eventName,
+          "a_b_visible": a_b_visible,
+          "a_b_visible_new": a_b_visible,
+          "platform": platform,
+          "captured_event_id": event?.id,
+          "original_parameters": parameters || {}
+        }
+      }
+    ]);
+
+    fetch(`https://webhook-gateway.verifast.ai/api/track/shopify?sender=${platform}&index_name=${selectedIndex}&event=${eventName}`, {
+      method: 'POST',
+      headers: headers,
+      body: data
+    })
+    .then(response => response.text())
+    .then(result => console.log('Captured event sent to API:', result))
+    .catch(error => console.error('Error sending captured event:', error));
+  } catch (error) {
+    console.error('Error capturing event:', error);
+  }
+}
+
+
+
+function vfInitEventCapture(selectedIndex, customerId, eventToCapture) {
+  try {
+    // const eventToCapture = {
+    //   "GA4": ["Magic Checkout Requested", "Payment successful"],
+    //   "Facebook": ["Magic Checkout Requested", "Payment successful"],
+    //   "Custom": ["Magic Checkout Requested", "Payment successful"]
+    // }
+    const e2C = eventToCapture || {}
+
+    for (const [platform, events] of Object.entries(e2C)) {
+      vfCapturePlatformEvent(platform, events, selectedIndex, customerId);
+    }
+  } catch (e) {
+    console.error("error in initEventCapture", e);
+  }
+}
+
+function vfCapturePlatformEvent(platform, events, selectedIndex, customerId) {
+  try {
+    // Create a Set for faster lookup of target events
+    const targetEventsSet = new Set(events);
+
+    if (platform === 'GA4') {
+      const checkGtag = () => {
+        if (typeof window.gtag !== 'undefined') {
+          const originalGtag = window.gtag;
+          window.gtag = (...args) => {
+            originalGtag.apply(window, args);
+            // Only capture if the event name is in our target events array
+            if ((args.length > 1 && events.includes("ALL")) || (args.length > 1 && events.includes(args[1]))) {
+              vfCaptureEvent('GA4', args, selectedIndex, customerId);
+            }
+          };
+        } else if (typeof window.gtag === 'undefined') {
+          setTimeout(checkGtag, 100);
+        }
+      };
+      checkGtag();
+    }
+
+    if (platform === 'Facebook') {
+      const checkFbq = () => {
+        if (typeof window.fbq !== 'undefined') {
+          const originalFbq = window.fbq;
+          window.fbq = (...args) => {
+            originalFbq.apply(window, args);
+            // Only capture if the event name is in our target events array
+            if ((args.length > 1 && events.includes("ALL")) || (args.length > 1 && events.includes(args[1]))) {
+              vfCaptureEvent('Facebook', args, selectedIndex, customerId);
+            }
+          };
+        } else if (typeof window.fbq === 'undefined') {
+          setTimeout(checkFbq, 100);
+        }
+      };
+      checkFbq();
+    }
+
+    // Add custom event listener for the specified events
+    events.forEach(eventName => {
+      document.addEventListener(eventName, (event) => {
+        vfCaptureEvent(platform, ['event', eventName, event.detail], selectedIndex, customerId);
+      });
+    });
+
+  } catch (e) {
+    console.error("error in vfCapturePlatformEvent", e);
+  }
+}
+
+function initChatbot(config) {
+  try {
+    const customerId = config.verifastSettings.customerId;
+    const selectedIndex = config.verifastSettings.selectedIndex;
+    const recordInteraction = config.verifastSettings.recordInteraction;
+    const eventToCapture = config.verifastSettings.eventToCapture;
+    vfInitEventCapture(selectedIndex, customerId, eventToCapture);
+    if (recordInteraction) {
+      // Send data every 2 seconds
+      console.debug("Sending data every 2 seconds")
+      let iframe = document.getElementById('verifast-react-chatbot-iframe');
+      setInterval(async () => {
+        const interactionData = collectInteractionData();
+        await fetch(`https://webhook-gateway.verifast.ai/api/track/interaction/${selectedIndex}/${customerId}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(interactionData)
+        })
+          .then(response => response.json())
+          .then(data => {
+            const actionable = data?.data?.actionable;
+            if (!actionable || Object.keys(actionable).length === 0) return;
+
+            const at = getActionTaken();
+
+            const sendActionToIframe = (key, value) => {
+              if (!iframe) {
+                iframe = document.getElementById('verifast-react-chatbot-iframe');
+              }
+
+              if (iframe) {
+                iframe.contentWindow.postMessage({
+                  event_name: 'actionable_interaction',
+                  data: { [key]: value },
+                  event_source: ""
+                }, '*');
+              }
+            };
+
+            for (const [key, value] of Object.entries(actionable)) {
+              if (at[key]) {
+                console.debug("duplicate action", key, value);
+                continue;
+              }
+
+              sendActionToIframe(key, value);
+              localStorage.setItem('vf_action_taken', JSON.stringify({
+                ...at,
+                [key]: {
+                  ...value,
+                  timestamp: Date.now(),
+                  ttl: value.ttl ?? vfTTl
+                }
+              }));
+            }
+          })
+          .catch(error => {
+            console.error('Error sending interaction data:', error);
+          });
+      }, 2000);
+    }
+    vfRecordTraffic(selectedIndex, customerId);
+  } catch (e) {
+    console.error("error in rapid api call:", e);
+  }
+
+  try {
+
+    if (config.verifastSettings.disableOnMobile) {
+      const deviceInfo = isVfMobileDevice();
+      if (deviceInfo.isMobile) {
+        console.debug('Chatbot disabled on mobile devices');
+        return;
+      }
+    }
+
+    if (config.verifastSettings.botDisabled) {
+      return;
+    }
+
+    const customerId = config.verifastSettings.customerId;
+    const selectedIndex = config.verifastSettings.selectedIndex;
+    try {
+      if (config.verifastSettings.disabledSessionIdCartUpdate && config.verifastSettings.disabledSessionIdCartUpdate === false) {
+        return;
+      }
+      appendVerifastSessionToCart()
+    } catch (e) { }
+    
+    const isVisible = isBotVisible(customerId, selectedIndex);
+    console.debug('[verifast] A/B testing visibility ', isVisible);
+
+    if (!isVisible) {
+      return;
+    }
+  } catch (err) {
+    console.debug("failed to find window object", err);
+  }
+
+  try {
+
+    if (['neesh-perfumes.myshopify.com', '37aa3a-3.myshopify.com'].includes(config?.verifastSettings?.selectedIndex) || config?.verifastSettings?.containerAbsolutetop || config?.verifastSettings?.chatbotAbsoluteTop) {
+      const chatbotContainer = document.getElementById('react-chatbot-container');
+      if (chatbotContainer) {
+        document.body.appendChild(chatbotContainer);
+        console.debug('react-chatbot-container has been moved to body!');
+      } else {
+        console.debug('react-chatbot-container not found.');
+      }
+    }
+
+    if (config?.verifastSettings?.persistUtm) {
+      try {
+        utm_verifast_persistant()
+      } catch (e) { }
+    }
+
+    // Check if paths are specified in config and only show on those paths
+    if (config?.verifastSettings?.enabledPaths && config?.verifastSettings?.enabledPaths.length > 0) {
+      const currentPath = window.location.pathname;
+      const isPathEnabled = config.verifastSettings.enabledPaths.some(path => {
+        if (path === '/home' && currentPath === '/') {
+          return true;
+        }
+        const cleanConfigPath = path.replace(/\/+/g, '/').replace(/\/$/, '');
+        const cleanCurrentPath = currentPath.replace(/\/+/g, '/').replace(/\/$/, '');
+        const configPathWithoutSlash = cleanConfigPath.replace(/^\//, '');
+        const currentPathWithoutSlash = cleanCurrentPath.replace(/^\//, '');
+        return currentPathWithoutSlash.includes(configPathWithoutSlash);
+      });
+
+      if (!isPathEnabled) {
+        console.debug("verifast chatbot disabled for path:", currentPath);
+        return;
+      }
+    }
+
+    const isDisabled = config.verifastSettings?.botDisablePaths?.some(configPath => {
+      if (configPath === '/home' && window.location.pathname === '/') {
+        return true;
+      }
+      const cleanConfigPath = configPath.replace(/\/+/g, '/').replace(/\/$/, '');
+      const cleanCurrentPath = window.location.pathname.replace(/\/+/g, '/').replace(/\/$/, '');
+
+      const configPathWithoutSlash = cleanConfigPath.replace(/^\//, '');
+      const currentPathWithoutSlash = cleanCurrentPath.replace(/^\//, '');
+
+      return currentPathWithoutSlash.includes(configPathWithoutSlash);
+    });
+
+    if (isDisabled) {
+      console.debug("verifast chatbot disabled for path:", window.location.pathname);
+      return;
+    }
+  } catch {
+    console.debug("failed to find window object")
+  }
+
+  const container = document.getElementById('react-chatbot-container');
+  let iframe = container.querySelector('iframe');
+  console.debug("CHATBOT V1.2")
+
+  if (!iframe) {
+    iframe = document.createElement('iframe');
+    iframe.id = 'verifast-react-chatbot-iframe';
+    iframe.allow = "microphone; camera"
+
+    if (window.location && window.location.href) {
+      config.verifastSettings["currentPageHref"] = window.location.href
+    }
+    const urlParams = new URLSearchParams(window.location.search);
+    const verifastOverwrite = urlParams.get('verifast-overwrite');
+    const botUrlOverwrite = urlParams.get('verifast-ui-overwrite')
+
+    let updatedConfig = vfModifyConfig(config.verifastSettings)
+
+    if (verifastOverwrite) {
+      try {
+        updatedConfig["websocketUrl"] = verifastOverwrite;
+      } catch (error) {
+        console.error('Error updating websocketUrl:', error);
+      }
+    }
+
+    const encodedSettings = encodeURIComponent(JSON.stringify(updatedConfig));
+
+    let {
+      agentIconPosition,
+      iconSpaceFromSide,
+      iconSpaceFromBottom,
+      selectedIndex,
+      botUrl
+    } = updatedConfig;
+
+    if (updatedConfig?.zIndex) {
+      container.style.zIndex = updatedConfig?.zIndex
+    }
+
+    if (agentIconPosition === 'left') {
+      iframe.style.left = `${iconSpaceFromSide || 20}px`;
+    } else {
+      iframe.style.right = `${iconSpaceFromSide || 20}px`;
+    }
+
+    const isMobile = window.innerWidth <= 768;
+
+    if (isMobile && selectedIndex === 'dr-vaidya.myshopify.com') {
+      iframe.style.bottom = '150px';
+    } else {
+      iframe.style.bottom = `${iconSpaceFromBottom || 20}px`;
+    }
+
+    try {
+      // Constants for icon sizes
+      const DEFAULT_ICON_SIZE = 60;
+      const LARGE_ICON_SIZE = 70;
+      const ICON_SIZE_TYPES = {
+        CUSTOM: 'custom',
+        LARGE: 'large'
+      };
+
+      // Get icon dimensions based on configuration
+      const isCustomIcon = updatedConfig?.agentIconSize === ICON_SIZE_TYPES.CUSTOM;
+      const isLargeIcon = updatedConfig?.agentIconSize === ICON_SIZE_TYPES.LARGE;
+      
+      // Helper function to safely convert to integer
+      const toInteger = (value) => {
+        if (typeof value === 'number') return Math.floor(value);
+        if (typeof value === 'string') {
+          const parsed = parseInt(value, 10);
+          return isNaN(parsed) ? DEFAULT_ICON_SIZE : parsed;
+        }
+        return DEFAULT_ICON_SIZE;
+      };
+
+      let iconWidth = isCustomIcon ? toInteger(updatedConfig?.iconWidth) : DEFAULT_ICON_SIZE;
+      let iconHeight = isCustomIcon ? toInteger(updatedConfig?.iconHeight) : DEFAULT_ICON_SIZE;
+
+      if (isLargeIcon) {
+        iconWidth = LARGE_ICON_SIZE;
+        iconHeight = LARGE_ICON_SIZE;
+      }
+
+      iframe.style.width = `${iconWidth + 5}px`;
+      iframe.style.height = `${iconHeight + 5}px`;
+    } catch (err) { }
+
+    if (botUrlOverwrite) {
+      botUrl = botUrlOverwrite;
+    }
+
+    const url = new URL(botUrl);
+    url.searchParams.append('verifastSettings', encodedSettings);
+
+    iframe.src = url.toString();
+    console.debug(url.toString())
+    container.appendChild(iframe);
+
+
+    window.addEventListener('message', (e) => vfHandleMessage(e, updatedConfig));
+  } else {
+    console.debug('Chatbot iframe already exists');
+  }
+}
+
+function verifastToggleBot() {
+  const iframe = document.getElementById('verifast-react-chatbot-iframe');
+  iframe.contentWindow.postMessage({
+    event_name: 'verifast-toggle-bot',
+    event_source: ""
+  }, '*');
+}
+
+function vfHandleMessage(event, config) {
+  if (event.data?.type === 'resize') {
+    const iframe = document.getElementById('verifast-react-chatbot-iframe');
+    const container = document.getElementById('react-chatbot-container');
+    const { width, height, isDialogOpened, isFullScreenRequested } = event.data.dimensions;
+
+    const configZindex = config.zIndex
+    if (vfLastProcessedTime === undefined || event.data.timestamp > vfLastProcessedTime) {
+      console.debug(vfLastProcessedTime);
+      if (vfLastProcessedTime === undefined) vfLastProcessedTime = event.data.timestamp;
+      iframe.style.width = width;
+      iframe.style.height = height;
+
+      if (isFullScreenRequested) {
+        iframe.classList.add('verifast-fullscreen-all');
+        iframe.style.bottom = '20px'
+        container.style.zIndex = '2147483647'
+      } else {
+        iframe.classList.remove('verifast-fullscreen-all');
+        iframe.style.bottom = `${config.iconSpaceFromBottom}px` || '20px'
+        container.style.zIndex = configZindex
+      }
+
+      if (isDialogOpened) {
+        iframe.classList.add('verifast-fullscreen');
+        iframe.style.bottom = '20px'
+        container.style.zIndex = '2147483647'
+      } else {
+        iframe.classList.remove('verifast-fullscreen');
+        iframe.style.bottom = `${config.iconSpaceFromBottom}px` || '20px'
+        container.style.zIndex = configZindex
+      }
+
+      event.source.postMessage({
+        type: 'resize-ack',
+        success: true,
+        receivedDimensions: event.data.dimensions,
+        timestamp: event.data.timestamp
+      }, '*');
+      vfLastProcessedTime = event.data.timestamp;
+
+      setTimeout(() => {
+        const width = iframe.style.width
+        const height = iframe.style.height
+        const isDialogOpened = iframe.classList.contains('verifast-fullscreen')
+        event.source.postMessage({
+          type: 'resize-reconfirm',
+          dimensions: {
+            width: width,
+            height: height,
+            isDialogOpened: isDialogOpened
+          },
+          timestamp: Date.now()
+        }, '*');
+        console.debug(`sending recorm resize width ${width}, height ${height}, isDialogOpened ${isDialogOpened}`)
+      }, 2000);
+    }
+  }
+
+  if (event.data?.event_name === 'verifast-toggle-bot') {
+    console.debug("Got toggle bot event")
+    const event_source = event.data?.event_source
+    console.debug(`source is ${event_source}`)
+    if (event_source === undefined || event_source === null) {
+      console.debug(`Cannot have event_source as undefined for bot_transition`)
+    } else {
+      console.debug(`Toggling bot from ${event_source}`)
+      verifastToggleBot()
+    }
+  }
+
+  if (event.data?.event_name === "shopify_add_to_cart" || event.data?.event_name === 'page_location_replace') {
+    console.debug("adding to card")
+    const cartLink = event.data.cartLink
+    if (cartLink) {
+      window.location.href = cartLink
+    }
+  }
+  if (event?.data?.type === 'execute-function') {
+    console.debug("Received execute-function event");
+    console.debug("Function body:", event?.data?.functionBody);
+
+    try {
+      const func = new Function(event.data.functionBody);
+      console.debug("Created function:", func.toString());
+
+      const result = func();
+      console.debug("Function execution result:", result);
+
+      if (result instanceof Promise) {
+        console.debug("Result is a Promise, handling asynchronously");
+        result.then(finalResult => {
+          console.debug("Promise resolved:", finalResult);
+          event.source.postMessage({
+            type: 'function-result',
+            result: finalResult,
+            success: true
+          }, '*');
+        }).catch(error => {
+          console.error("Promise rejected:", error);
+          event.source.postMessage({
+            type: 'function-result',
+            error: error.message,
+            success: false
+          }, '*');
+        });
+      } else {
+        console.debug("Result is not a Promise, sending directly");
+        event.source.postMessage({
+          type: 'function-result',
+          result: result,
+          success: true
+        }, '*');
+      }
+    } catch (error) {
+      console.error("Error in function execution:", error);
+      event.source.postMessage({
+        type: 'function-result',
+        error: error.message,
+        success: false
+      }, '*');
+    }
+  }
+}
+
+let isVerifastInitialized = false;
+let initializationTimeout;
+
+function handleVerifastInit() {
+  if (isVerifastInitialized) {
+    console.debug('Verifast bot already initialized, skipping...');
+    return;
+  }
+
+  try {
+    const verifastBotConfig = verifast_bot_config;
+    console.debug(verifastBotConfig);
+    initChatbot(verifastBotConfig);
+    isVerifastInitialized = true;
+
+    if (initializationTimeout) {
+      clearTimeout(initializationTimeout);
+      initializationTimeout = null;
+    }
+  } catch (error) {
+    console.error("Failed to initialize Verifast bot:", error);
+  }
+}
+
+document.addEventListener("DOMContentLoaded", handleVerifastInit);
+initializationTimeout = setTimeout(handleVerifastInit, 10000);
